@@ -1,0 +1,253 @@
+name: Build Android APK
+
+on:
+  push:
+    paths:
+      - 'android_build.txt'
+  workflow_dispatch:
+
+permissions:
+  actions: write # 明确授予删除 Artifacts 和 Caches 的权限
+  contents: write # 显式赋予写入 Release 和文件的权限
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: '17'
+
+      # 安装 Android SDK (包含 apksigner 和 zipalign 工具) 及 32位兼容库 (dpt 工具部分底层依赖需要)
+      - name: Install Android SDK & System Dependencies
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y wget unzip libc6:i386 libstdc++6:i386 zlib1g:i386
+          
+          sudo mkdir -p /usr/local/lib/android/sdk
+          sudo chown $USER:$USER /usr/local/lib/android/sdk
+          wget https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdline-tools.zip
+          unzip -q cmdline-tools.zip
+          rm -rf /usr/local/lib/android/sdk/cmdline-tools/latest
+          mkdir -p /usr/local/lib/android/sdk/cmdline-tools/latest
+          mv cmdline-tools/* /usr/local/lib/android/sdk/cmdline-tools/latest/
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$PATH
+          export PATH=$ANDROID_HOME/platform-tools:$PATH
+
+      - name: Install Android API 36 & Build Tools
+        run: |
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$PATH
+          yes | sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.8'
+          channel: stable
+          cache: true
+
+      - name: Flutter doctor
+        run: flutter doctor -v
+
+      # -------------------------------------------------------------
+      # 缓存管理
+      # -------------------------------------------------------------
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: ~/.gradle
+          key: gradle-android-${{ runner.os }}-${{ hashFiles('pan_client/android/build.gradle') }}-${{ github.run_id }}
+          restore-keys: |
+            gradle-android-${{ runner.os }}-${{ hashFiles('pan_client/android/build.gradle') }}
+            gradle-android-${{ runner.os }}
+
+      - name: Cache pub dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-android-${{ runner.os }}-${{ hashFiles('pan_client/pubspec.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            pub-android-${{ runner.os }}-${{ hashFiles('pan_client/pubspec.lock') }}
+            pub-android-${{ runner.os }}
+
+      - name: Install dependencies
+        working-directory: pan_client
+        run: flutter pub get
+
+      
+      
+      # -------------------------------------------------------------
+      # 步骤 1：Flutter 按 ABI 架构拆分构建未签名的原包 (arm64-v8a / armeabi-v7a)
+      # -------------------------------------------------------------
+      - name: Build Unsigned Release APKs (Split per ABI)
+        working-directory: pan_client
+        run: |
+          flutter build apk --release --split-per-abi
+
+      # -------------------------------------------------------------
+      # 步骤 2：遍历使用 dpt-shell 对各个 ABI 包进行 DEX 抽壳加固
+      # -------------------------------------------------------------
+      - name: Reinforce APKs with dpt-shell
+        run: |
+          mkdir -p output_reinforced
+          mkdir -p dpt_tools
+
+          DOWNLOAD_URL="https://github.com/luoyesiqiu/dpt-shell/releases/download/v2.18.0/dpt-shell-v2.18.0.zip"
+          echo "正在从指定链接下载 dpt-shell v2.18.0..."
+          curl -sSL "$DOWNLOAD_URL" -o dpt_tools/dpt-shell.zip
+          unzip -q dpt_tools/dpt-shell.zip -d dpt_tools/
+
+          DPT_JAR="dpt_tools/executable/dpt.jar"
+          ABS_OUTPUT=$(realpath output_reinforced)
+
+          if [ -f "$DPT_JAR" ]; then
+            # 循环遍历 flutter 生成的 arm 架构 APK
+            find pan_client/build/app/outputs/flutter-apk/ -name "app-arm*-release.apk" | while read -r APK_PATH; do
+              APK_NAME=$(basename "$APK_PATH")
+              ABS_APK=$(realpath "$APK_PATH")
+              echo "========================================"
+              echo "正在对 $APK_NAME 进行 dpt-shell 加固..."
+              
+              # 记录处理前输出文件夹的文件数，用于判定是否产生新包
+              BEFORE_COUNT=$(find "$ABS_OUTPUT" -name "*.apk" | wc -l)
+
+              cd dpt_tools/executable
+              java --add-opens java.base/java.lang=ALL-UNNAMED \
+                   --add-opens java.base/java.io=ALL-UNNAMED \
+                   -jar dpt.jar \
+                   -f "$ABS_APK" \
+                   -o "$ABS_OUTPUT" \
+                   -x \
+                   --disable-anti-debug || true
+              cd ../..
+
+              AFTER_COUNT=$(find "$ABS_OUTPUT" -name "*.apk" | wc -l)
+              if [ "$AFTER_COUNT" -gt "$BEFORE_COUNT" ]; then
+                echo "✅ $APK_NAME 加固成功"
+              else
+                echo "⚠️ $APK_NAME 加固未生成新文件，降级使用原包"
+                cp "$ABS_APK" "$ABS_OUTPUT/$APK_NAME"
+              fi
+            done
+          else
+            echo "⚠️ 未找到 dpt.jar，将所有原始包直接复制到输出目录"
+            cp pan_client/build/app/outputs/flutter-apk/app-arm*-release.apk output_reinforced/
+          fi
+
+      # -------------------------------------------------------------
+      # 步骤 3：批量对齐 (zipalign) 并使用 Keystore 签名
+      # -------------------------------------------------------------
+      - name: Sign All Reinforced APKs with Android apksigner
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_STORE_PASSWORD }}
+          KEYSTORE_ALIAS: ${{ secrets.KEYSTORE_KEY_ALIAS }}
+          KEYSTORE_ALIAS_PASSWORD: ${{ secrets.KEYSTORE_KEY_PASSWORD }}
+        run: |
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          BUILD_TOOLS=$ANDROID_HOME/build-tools/36.0.0
+          
+          mkdir -p signed_apks
+
+          for APK_PATH in output_reinforced/*.apk; do
+            [ -e "$APK_PATH" ] || continue
+            FILE_NAME=$(basename "$APK_PATH")
+            # 将包名从 app-arm64-v8a-release.apk 替换为 pan-client-arm64-v8a-release-signed.apk
+            TARGET_NAME="${FILE_NAME//app-/pan-client-}"
+            TARGET_NAME="${TARGET_NAME//.apk/-signed.apk}"
+
+            echo "----------------------------------------"
+            echo "正在对齐与签名: $FILE_NAME -> $TARGET_NAME"
+
+            # 1. 对齐
+            $BUILD_TOOLS/zipalign -v -p 4 "$APK_PATH" "signed_apks/aligned_$FILE_NAME"
+
+            # 2. 签名
+            $BUILD_TOOLS/apksigner sign \
+              --ks keystone \
+              --ks-pass pass:"$KEYSTORE_PASSWORD" \
+              --ks-key-alias "$KEYSTORE_ALIAS" \
+              --key-pass pass:"$KEYSTORE_ALIAS_PASSWORD" \
+              --out "signed_apks/$TARGET_NAME" \
+              "signed_apks/aligned_$FILE_NAME"
+
+            # 3. 清理临时文件 & 验证
+            rm -f "signed_apks/aligned_$FILE_NAME"
+            $BUILD_TOOLS/apksigner verify -v "signed_apks/$TARGET_NAME"
+          done
+
+      # -------------------------------------------------------------
+      # 缓存与产物清理
+      # -------------------------------------------------------------
+      - name: Delete old Android caches before saving new
+        uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              const caches = await github.rest.actions.getActionsCacheList({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+              });
+              const currentRunId = "${{ github.run_id }}";
+              for (const cache of caches.data.actions_caches) {
+                const isAndroidCache = cache.key.startsWith('gradle-android-') || cache.key.startsWith('pub-android-');
+                const isNotCurrentRun = !cache.key.endsWith(currentRunId);
+                if (isAndroidCache && isNotCurrentRun) {
+                  console.log(`[Android Cleanup] Deleting old cache: ${cache.key} (ID: ${cache.id})`);
+                  await github.rest.actions.deleteActionsCacheById({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    cache_id: cache.id,
+                  });
+                }
+              }
+            } catch (error) {
+              console.log('Error deleting old Android caches:', error.message);
+            }
+
+      - name: Delete old APK artifact
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const res = await github.rest.actions.listArtifactsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            const targetName = 'pan-client-release-apks';
+            for (const artifact of res.data.artifacts) {
+              if (artifact.name === targetName) {
+                console.log(`[Artifact Cleanup] Deleting matching APK artifact: ${artifact.name} (ID: ${artifact.id})`);
+                await github.rest.actions.deleteArtifact({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  artifact_id: artifact.id,
+                });
+              }
+            }
+
+      # -------------------------------------------------------------
+      # 发布所有架构包到 GitHub Releases & Artifacts
+      # -------------------------------------------------------------
+      - name: Release APKs to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: "Release v1.0.${{ github.run_number }}"
+          body: "使用 dpt-shell 完成 DEX 抽壳加固并独立打包的 ARMv7 (32位) 和 ARM64 (64位) Android Release 版本。"
+          files: signed_apks/pan-client-*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # - name: Upload APK artifacts
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: pan-client-release-apks
+      #     path: signed_apks/pan-client-*.apk
+      #     retention-days: 3

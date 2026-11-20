@@ -1,0 +1,363 @@
+name: Build macOS Release App (Universal Binary for ARM64 + x86_64)
+
+on:
+  # 当 macos_build.txt 发生变化时自动构建
+  push:
+    paths:
+      - "macos_build.txt"
+
+  # 支持在 GitHub Actions 页面手动触发
+  workflow_dispatch:
+
+# GitHub Actions 权限
+permissions:
+  actions: write
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+      # ============================================================
+      # 1. 检出代码
+      # ============================================================
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ============================================================
+      # 2. 设置 Java 17
+      # ============================================================
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: "zulu"
+          java-version: "17"
+
+      # ============================================================
+      # 3. 设置 Flutter SDK
+      # ============================================================
+      - name: Set up Flutter SDK
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.44.8"
+          channel: "stable"
+          cache: true
+
+      # ============================================================
+      # 4. 启用 macOS Desktop
+      # ============================================================
+      - name: Enable macOS support
+        run: |
+          flutter config --enable-macos-desktop
+          echo "Flutter version:"
+          flutter --version
+          echo ""
+          echo "Flutter doctor:"
+          flutter doctor -v
+
+      # ============================================================
+      # 5. 缓存 Pub 依赖
+      # ============================================================
+      - name: Cache pub dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-macos-${{ runner.os }}-${{ hashFiles('pan_client/pubspec.lock') }}
+          restore-keys: |
+            pub-macos-${{ runner.os }}-
+
+      # ============================================================
+      # 6. 获取 Flutter 依赖
+      # ============================================================
+      - name: Install Flutter dependencies
+        working-directory: pan_client
+        run: |
+          flutter pub get
+
+      # ============================================================
+      # 7. 安装 CocoaPods
+      # ============================================================
+      - name: Install CocoaPods dependencies
+        working-directory: pan_client/macos
+        run: |
+          pod install --repo-update
+
+      # ============================================================
+      # 8. 配置 macOS Universal Binary 环境
+      # ============================================================
+      - name: Configure macOS Universal Binary
+        working-directory: pan_client
+        run: |
+          echo "Configuring Xcode architectures..."
+          xcrun agvtool what-version || true
+          echo "Xcode version:"
+          xcodebuild -version
+          echo ""
+          echo "Available architectures:"
+          uname -m
+      # ============================================================
+      # 9. 编译 macOS Release ( Universal Binary )
+      # ============================================================
+      - name: Build macOS App
+        working-directory: pan_client
+        run: |
+          set -e
+          echo "Preparing output directories..."
+          mkdir -p "$GITHUB_WORKSPACE/output_macos"
+          mkdir -p "$GITHUB_WORKSPACE/vanguard_symbols"
+
+          echo ""
+          echo "Building Flutter macOS Universal Binary application..."
+          echo ""
+
+          export CODE_SIGN_IDENTITY="-"
+          export CODE_SIGNING_REQUIRED="NO"
+          export CODE_SIGNING_ALLOWED="NO"
+
+          # 关键配置：指定包含 arm64 与 x86_64 两种架构，且不只针对当前 active 架构
+          export ARCHS="arm64 x86_64"
+          export ONLY_ACTIVE_ARCH="NO"
+
+          flutter build macos \
+            --release \
+            -t lib/main.dart \
+            --obfuscate \
+            --split-debug-info="$GITHUB_WORKSPACE/vanguard_symbols" \
+            --extra-gen-snapshot-options=--deterministic
+
+      # ============================================================
+      # 10. 查找生成的 App
+      # ============================================================
+      - name: Locate macOS App
+        run: |
+          echo "Searching generated macOS application..."
+          find pan_client/build/macos -name "*.app" -type d -print
+
+      # ============================================================
+      # 11. 验证 Universal Binary
+      # ============================================================
+      - name: Verify Universal Binary Architectures
+        run: |
+          set -e
+
+          APP_PATH="pan_client/build/macos/Build/Products/Release/PCloud.app"
+          EXECUTABLE="$APP_PATH/Contents/MacOS/PCloud"
+
+          echo "================================================"
+          echo "Checking macOS application"
+          echo "================================================"
+
+          if [ ! -d "$APP_PATH" ]; then
+            echo "ERROR: App not found: $APP_PATH"
+            exit 1
+          fi
+
+          if [ ! -f "$EXECUTABLE" ]; then
+            echo "ERROR: Executable not found: $EXECUTABLE"
+            exit 1
+          fi
+
+          ARCH_INFO="$(lipo -info "$EXECUTABLE")"
+          echo "Architecture info: $ARCH_INFO"
+
+          if [[ "$ARCH_INFO" != *"arm64"* ]] || [[ "$ARCH_INFO" != *"x86_64"* ]]; then
+            echo "ERROR: Missing required architectures!"
+            exit 1
+          fi
+
+          echo "Universal Binary verification PASSED!"
+
+      # ============================================================
+      # 12. 查看 App 大小
+      # ============================================================
+      - name: Show App Size
+        run: |
+          du -sh pan_client/build/macos/Build/Products/Release/PCloud.app
+
+      # ============================================================
+      # 13. 剥离多余调试符号并重新签名 (修复启动崩溃的核心改动)
+      # ============================================================
+      - name: Strip Debug Symbols & Resign
+        run: |
+          APP_DIR="pan_client/build/macos/Build/Products/Release/PCloud.app"
+
+          echo "Stripping executable..."
+          strip -x "$APP_DIR/Contents/MacOS/"* 2>/dev/null || true
+
+          echo "Stripping frameworks..."
+          if [ -d "$APP_DIR/Contents/Frameworks" ]; then
+            find "$APP_DIR/Contents/Frameworks" -type f -perm -111 -exec strip -x {} \; 2>/dev/null || true
+          fi
+          echo "Strip completed."
+
+          echo "Resigning App with Ad-hoc signature..."
+          codesign --force --deep --sign - "$APP_DIR"
+          echo "Resign completed."
+
+      # ============================================================
+      # 14. 再次检查主程序
+      # ============================================================
+      - name: Verify Binary After Strip & Resign
+        run: |
+          APP_PATH="pan_client/build/macos/Build/Products/Release/PCloud.app"
+          EXECUTABLE="$APP_PATH/Contents/MacOS/PCloud"
+          lipo -info "$EXECUTABLE"
+          codesign -vvv "$APP_PATH" || true
+
+      # ============================================================
+      # 15. 创建 ZIP 归档
+      # ============================================================
+      - name: Create macOS ZIP archive
+        run: |
+          set -e
+          VERSION="1.0.${{ github.run_number }}"
+          OUTPUT="$GITHUB_WORKSPACE/output_macos/pan-client-macos-universal-v${VERSION}.zip"
+
+          cd pan_client/build/macos/Build/Products/Release
+          ditto -c -k --sequesterRsrc --keepParent "PCloud.app" "$OUTPUT"
+          echo "ZIP created: $OUTPUT"
+
+      # ============================================================
+      # 16. 创建 DMG 镜像
+      # ============================================================
+      - name: Create macOS DMG Image
+        run: |
+          set -e
+          VERSION="1.0.${{ github.run_number }}"
+          DMG_OUTPUT="$GITHUB_WORKSPACE/output_macos/pan-client-macos-universal-v${VERSION}.dmg"
+
+          echo "Installing create-dmg..."
+          brew install create-dmg
+
+          echo "Building DMG image..."
+          cd pan_client/build/macos/Build/Products/Release
+
+          create-dmg \
+            --volname "PCloud Installer" \
+            --volicon "$GITHUB_WORKSPACE/pan_client/macos/Runner/Assets.xcassets/AppIcon.appiconset/app_icon_512.png" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --icon "PCloud.app" 140 190 \
+            --hide-extension "PCloud.app" \
+            --app-drop-link 460 190 \
+            "$DMG_OUTPUT" \
+            "PCloud.app" || true
+
+          if [ ! -f "$DMG_OUTPUT" ]; then
+            echo "create-dmg failed, falling back to hdiutil..."
+            hdiutil create -volname "PCloud" -srcfolder "PCloud.app" -ov -format UDZO "$DMG_OUTPUT"
+          fi
+
+          echo "DMG created successfully:"
+          ls -lh "$DMG_OUTPUT"
+
+      # ============================================================
+      # 17. 打包 Dart Debug Symbols
+      # ============================================================
+      - name: Archive Debug Symbols
+        run: |
+          set -e
+          VERSION="1.0.${{ github.run_number }}"
+          OUTPUT="$GITHUB_WORKSPACE/output_macos/pan-client-macos-symbols-v${VERSION}.zip"
+
+          cd "$GITHUB_WORKSPACE"
+          if [ ! -d "vanguard_symbols" ]; then
+            mkdir -p vanguard_symbols
+          fi
+
+          zip -r -9 "$OUTPUT" vanguard_symbols
+          echo "Symbols archive created: $OUTPUT"
+
+      # ============================================================
+      # 18. 查看最终产物
+      # ============================================================
+      - name: Show Build Artifacts
+        run: |
+          echo "================================================"
+          echo "Final build artifacts"
+          echo "================================================"
+          ls -lh output_macos/
+          echo ""
+          echo "SHA256:"
+          shasum -a 256 output_macos/*
+
+      # ============================================================
+      # 19. 删除旧的 macOS Pub Cache
+      # ============================================================
+      - name: Delete old macOS caches
+        uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              const caches = await github.rest.actions.getActionsCacheList({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                per_page: 100
+              });
+
+              const currentRunId = "${{ github.run_id }}";
+
+              for (const cache of caches.data.actions_caches) {
+                const isMacosCache = cache.key.startsWith("pub-macos-");
+                const isNotCurrentRun = !cache.key.includes(currentRunId);
+
+                if (isMacosCache && isNotCurrentRun) {
+                  try {
+                    await github.rest.actions.deleteActionsCacheById({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      cache_id: cache.id
+                    });
+                  } catch (deleteError) {
+                    console.log(`Failed to delete cache ${cache.id}: ${deleteError.message}`);
+                  }
+                }
+              }
+            } catch (error) {
+              console.log(`Error deleting old macOS caches: ${error.message}`);
+            }
+
+      # ============================================================
+      # 20. 发布 GitHub Release
+      # ============================================================
+      - name: Release macOS App & Symbols
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v1.0.${{ github.run_number }}"
+          name: "Release v1.0.${{ github.run_number }}"
+          generate_release_notes: false
+          body: |
+            ## pan_client macOS Release
+
+            **Build:** ${{ github.run_number }}
+
+            ### 📦 macOS 安装包
+
+            - **DMG 安装包 (推荐):** `pan-client-macos-universal-v1.0.${{ github.run_number }}.dmg`
+            - **ZIP 压缩包:** `pan-client-macos-universal-v1.0.${{ github.run_number }}.zip`
+
+            支持架构：
+            - Apple Silicon ARM64 (M1/M2/M3/M4)
+            - Intel x86_64
+
+            ### 🐛 Debug Symbols
+
+            `pan-client-macos-symbols-v1.0.${{ github.run_number }}.zip`
+
+            ### ⚠️ 安全提示（未签名应用）
+
+            如果安装后打开提示 **“应用已损坏，无法打开”**，请打开终端执行以下命令清除隔离属性：
+
+            ```bash
+            sudo xattr -rd com.apple.quarantine /Applications/PCloud.app
+            ```
+
+          files: |
+            output_macos/pan-client-macos-universal-v1.0.${{ github.run_number }}.dmg
+            output_macos/pan-client-macos-universal-v1.0.${{ github.run_number }}.zip
+            output_macos/pan-client-macos-symbols-v1.0.${{ github.run_number }}.zip
+
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,142 @@
+name: Build pan_client macOS App
+
+on:
+      
+  workflow_dispatch: 
+
+permissions:
+  actions: write # 明确授予读写 Actions artifacts 和 Caches 的权限
+
+jobs:
+  build:
+    name: Build macOS Release
+    runs-on: macos-latest
+
+    steps:
+      # 1. 检出代码
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. 设置 Flutter 环境
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      # -------------------------------------------------------------
+      # 3. 设置 macOS 专属缓存（与 Android 完全隔离）
+      # -------------------------------------------------------------
+      - name: Cache pub dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-macos-${{ runner.os }}-${{ hashFiles('pan_client/pubspec.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            pub-macos-${{ runner.os }}-${{ hashFiles('pan_client/pubspec.lock') }}
+            pub-macos-${{ runner.os }}
+
+      - name: Cache CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: pan_client/macos/Pods
+          key: pods-macos-${{ runner.os }}-${{ hashFiles('pan_client/macos/Podfile.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            pods-macos-${{ runner.os }}-${{ hashFiles('pan_client/macos/Podfile.lock') }}
+            pods-macos-${{ runner.os }}
+
+      # 4. 获取依赖
+      - name: Install dependencies
+        working-directory: pan_client
+        run: flutter pub get
+
+      # 5. 编译 macOS 桌面端 (Release 模式)
+      - name: Build macOS App
+        working-directory: pan_client
+        run: flutter build macos --release
+
+      # 6. 安装 create-dmg 制作 DMG 安装包
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      # 7. 打包为 DMG 文件
+      - name: Create DMG
+        working-directory: pan_client
+        run: |
+          create-dmg \
+            --volname "Pan Client Installer" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --icon "pan_client.app" 175 120 \
+            --hide-extension "pan_client.app" \
+            --app-drop-link 425 120 \
+            "build/macos/Build/Products/Release/pan_client.dmg" \
+            "build/macos/Build/Products/Release/pan_client.app"
+
+      # -------------------------------------------------------------
+      # 8. 精准清理：仅清理 macOS 相关的历史缓存（不影响 Android/Gradle 缓存）
+      # -------------------------------------------------------------
+      - name: Delete old macOS caches before saving new
+        uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              const caches = await github.rest.actions.getActionsCacheList({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+              });
+              
+              const currentRunId = "${{ github.run_id }}";
+              
+              for (const cache of caches.data.actions_caches) {
+                // 只匹配 pub-macos- 或 pods-macos- 开头的缓存，并且不是本次运行生成的
+                const isMacCache = cache.key.startsWith('pub-macos-') || cache.key.startsWith('pods-macos-');
+                const isNotCurrentRun = !cache.key.endsWith(currentRunId);
+
+                if (isMacCache && isNotCurrentRun) {
+                  console.log(`[macOS Cleanup] Deleting old cache: ${cache.key} (ID: ${cache.id})`);
+                  await github.rest.actions.deleteActionsCacheById({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    cache_id: cache.id,
+                  });
+                }
+              }
+            } catch (error) {
+              console.log('Error deleting old macOS caches:', error.message);
+            }
+
+      # -------------------------------------------------------------
+      # 9. 仅清理属于 macOS DMG 的历史产物（不影响 Android APK 产物）
+      # -------------------------------------------------------------
+      - name: Delete old macOS DMG artifact
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const res = await github.rest.actions.listArtifactsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            
+            // 明确要清理的 macOS 产物名称
+            const targetName = 'pan_client-macos-dmg';
+            
+            for (const artifact of res.data.artifacts) {
+              if (artifact.name === targetName) {
+                console.log(`[Artifact Cleanup] Deleting matching DMG artifact: ${artifact.name} (ID: ${artifact.id})`);
+                await github.rest.actions.deleteArtifact({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  artifact_id: artifact.id,
+                });
+              }
+            }
+
+      # 10. 上传新的 DMG 安装包
+      - name: Upload macOS Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pan_client-macos-dmg
+          path: pan_client/build/macos/Build/Products/Release/*.dmg
+          retention-days: 3

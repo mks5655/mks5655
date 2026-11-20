@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- 关闭应用沙盒限制，允许启动子进程 (Mihomo) 及执行系统命令 -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <!-- 允许 App 发起网络请求（HTTP/HTTPS/Socket） -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <!-- 允许 App 绑定本地端口（Mihomo 代理服务监听需要） -->
+    <key>com.apple.security.network.server</key>
+    <true/>
+    <!-- 允许用户选择文件夹进行文件读写（下载保存文件） -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+</dict>
+</plist>

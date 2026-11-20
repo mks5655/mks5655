@@ -1,0 +1,98 @@
+# ======================
+# Flutter/Dart
+# ======================
+
+# Flutter build output
+build/
+
+# Dart tool
+.dart_tool/
+
+# Pub dependencies
+.packages
+.pub-cache/
+.pub/
+build/
+
+# Generated files
+*.g.dart
+*.freezed.dart
+
+
+# ======================
+# IDE
+# ======================
+
+# Android Studio
+.idea/
+*.iml
+
+# VS Code
+.vscode/
+
+# IntelliJ
+*.ipr
+*.iws
+
+
+# ======================
+# Android
+# ======================
+
+# Gradle
+.gradle/
+
+# Android build output
+android/.gradle/
+android/local.properties
+
+# Keystore (不要上传签名文件)
+*.jks
+*.keystore
+
+
+# ======================
+# iOS
+# ======================
+
+# Xcode
+ios/Pods/
+ios/.symlinks/
+ios/Flutter/Flutter.framework
+ios/Flutter/Flutter.podspec
+
+# Xcode user files
+*.xcworkspace
+*.xcuserstate
+*.xcodeproj/project.xcworkspace
+
+# Build
+ios/build/
+
+
+# ======================
+# macOS
+# ======================
+
+.DS_Store
+
+
+# ======================
+# Environment / Secrets
+# ======================
+
+.env
+.env.*
+*.key
+*.pem
+
+# API key
+secrets.dart
+
+
+# ======================
+# Logs
+# ======================
+
+*.log
+*.part
