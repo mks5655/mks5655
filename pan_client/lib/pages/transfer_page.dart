@@ -132,10 +132,10 @@ class _TransferPageState extends State<TransferPage>
   }
 
   void _showAddShareBottomSheet() {
-    if (!_checkCardValid()) {
-      _showErrorDialog('当前卡密已失效或已过期，无法继续添加');
-      return;
-    }
+    //if (!_checkCardValid()) {
+    //  _showErrorDialog('当前卡密已失效或已过期，无法继续添加');
+     // return;
+    //}
 
     showModalBottomSheet(
       context: context,
