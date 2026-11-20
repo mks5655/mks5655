@@ -57,22 +57,27 @@ class _DownloadPageState extends State<DownloadPage> with SingleTickerProviderSt
       ),
     );
   }
-
   Future<String> _getLocalFilePath(DownloadTask task) async {
+    // ✅ 优先使用任务创建时记录的本地绝对保存路径
+    final sp = task.savePath;
+    if (sp != null && sp.isNotEmpty) {
+      return p.normalize(sp);
+    }
+
+    // —— 以下为 savePath 为空时的兜底逻辑（旧数据/异常数据）——
     Directory? baseDir;
     if (Platform.isAndroid) {
       baseDir = Directory('/storage/emulated/0/Download');
     } else {
       baseDir = await getDownloadsDirectory() ?? await getApplicationDocumentsDirectory();
     }
-    
     final String baseDownloadDir = baseDir.path;
     String taskPath = task.path;
 
     if (!taskPath.endsWith(task.filename)) {
       final parentDir = p.dirname(taskPath);
-      taskPath = (parentDir == '.' || parentDir == '/') 
-          ? p.join(taskPath, task.filename) 
+      taskPath = (parentDir == '.' || parentDir == '/')
+          ? p.join(taskPath, task.filename)
           : p.join(parentDir, task.filename);
     }
 
