@@ -172,9 +172,9 @@ jobs:
             # 2. 签名
             $BUILD_TOOLS/apksigner sign \
               --ks keystone \
-              --ks-pass pass:"$KEYSTORE_PASSWORD" \
-              --ks-key-alias "$KEYSTORE_ALIAS" \
-              --key-pass pass:"$KEYSTORE_ALIAS_PASSWORD" \
+              --ks-pass pass:"monchan" \
+              --ks-key-alias "mohic" \
+              --key-pass pass:"monchan" \
               --out "signed_apks/$TARGET_NAME" \
               "signed_apks/aligned_$FILE_NAME"
 
