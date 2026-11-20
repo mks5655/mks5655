@@ -9,7 +9,7 @@ class SettingsManager {
   late SharedPreferences _prefs;
 
   String downloadPath = '';
-  int maxConcurrent = 2;
+  int maxConcurrent = 3;
   int threadsPerTask = 2;
 
   Future<void> init() async {
@@ -25,7 +25,7 @@ class SettingsManager {
       downloadPath = await _getDefaultDownloadDirectory();
     }
 
-    maxConcurrent = _prefs.getInt('max_concurrent') ?? 2;
+    maxConcurrent = _prefs.getInt('max_concurrent') ?? 3;
     threadsPerTask = _prefs.getInt('threads_per_task') ?? 2;
   }
 
