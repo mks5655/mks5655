@@ -511,52 +511,117 @@ class _AddShareBottomSheetState extends State<AddShareBottomSheet> {
     super.dispose();
   }
 
-  /// 提取和清理杂文的核心方法（支持全自动提取链接与密码）
-  void _cleanAndParseInput() {
-    final rawText = _urlController.text.trim();
-    if (rawText.isEmpty) return;
+void _cleanAndParseInput() {
+  final rawText = _urlController.text.trim();
+  if (rawText.isEmpty) return;
 
-    // 1. 从一整段中文杂文里提取出干净的 https://pan.baidu.com/s/xxx 链接
-    final urlRegExp = RegExp(
-      r'https?://(?:pan|yun)\.baidu\.com/s/[a-zA-Z0-9_-]+[^\s]*',
-    );
-    final urlMatch = urlRegExp.firstMatch(rawText);
+  // 1. 一把梭匹配四种格式
+  final urlRegExp = RegExp(
+    r'https?://(?:pan|yun)\.baidu\.com/(?:'
+    r'(?:s|e)/[a-zA-Z0-9_-]+'          // 标准分享 / 加密短链
+    r'|netdisk/share\?[^\s]*'          // netdisk 分享
+    r'|share/init\?[^\s]*'             // init 分享
+    r')[^\s]*',
+  );
+  final urlMatch = urlRegExp.firstMatch(rawText);
+  if (urlMatch == null) return;
 
-    if (urlMatch != null) {
-      String cleanUrl = urlMatch.group(0)!;
-      // 抹掉链接末尾可能附带的中文或英文标点
-      cleanUrl = cleanUrl.replaceAll(RegExp(r'[，。！？；:：,]+$'), '');
+  String cleanUrl = urlMatch.group(0)!;
 
-      String extractedPwd = _pwdController.text.trim();
-
-      // 2. 尝试解析提取码
-      if (extractedPwd.isEmpty) {
-        // 方案 A：从 url 参数 ?pwd=xxxx 或 &pwd=xxxx 中提取
-        final pwdInUrlReg = RegExp(r'[?&]pwd=([a-zA-Z0-9]{4})');
-        final matchInUrl = pwdInUrlReg.firstMatch(cleanUrl);
-
-        if (matchInUrl != null) {
-          extractedPwd = matchInUrl.group(1)!;
-        } else {
-          // 方案 B：正则匹配“提取码: xxxx”或“密码: xxxx”
-          final pwdTextReg = RegExp(
-            r'(?:提取码|密码|pwd|码)\s*[:：]?\s*([a-zA-Z0-9]{4})',
-            caseSensitive: false,
-          );
-          final matchInText = pwdTextReg.firstMatch(rawText);
-          if (matchInText != null) {
-            extractedPwd = matchInText.group(1)!;
-          }
-        }
-      }
-
-      // 回填清洗后的结果
-      _urlController.text = cleanUrl;
-      if (extractedPwd.isNotEmpty) {
-        _pwdController.text = extractedPwd;
-      }
+  // 2. 先抠提取码（必须在改 URL 之前）
+  String extractedPwd = _pwdController.text.trim();
+  if (extractedPwd.isEmpty) {
+    final matchInUrl =
+        RegExp(r'[?&]pwd=([a-zA-Z0-9]{4})').firstMatch(cleanUrl);
+    if (matchInUrl != null) {
+      extractedPwd = matchInUrl.group(1)!;
     }
   }
+
+  // 3. 去尾部标点（先做，免得影响后面解析）
+  cleanUrl = cleanUrl.replaceAll(RegExp(r'[，。！？；:：,]+$'), '');
+
+  // 4. 按格式分别清洗
+  if (RegExp(r'/(?:s|e)/').hasMatch(cleanUrl)) {
+    // 标准 /s/ 和 /e/：path 即完整 ID，剥掉整个 query
+    cleanUrl = cleanUrl.split('?').first;
+  } else if (cleanUrl.contains('surl=')) {
+    // netdisk/share 或 share/init：保留 surl，剥掉 pwd 及其他参数
+    // 只保留 surl 一个参数即可
+    final surlMatch = RegExp(r'[?&]surl=([^&\s]+)').firstMatch(cleanUrl);
+    if (surlMatch != null) {
+      final surl = surlMatch.group(1)!;
+      // 统一用 netdisk/share?surl=xxx 的形式提交，
+      // 因为 /share/init 是"输入密码页"，真正分享 ID 就是 surl
+      cleanUrl = 'https://pan.baidu.com/netdisk/share?surl=$surl';
+    }
+  }
+
+  // 5. 若 URL 里没提到密码，从全文找「提取码: xxxx」
+  if (extractedPwd.isEmpty) {
+    final pwdTextReg = RegExp(
+      r'(?:提取码|密码|pwd|码)\s*[:：]?\s*([a-zA-Z0-9]{4})',
+      caseSensitive: false,
+    );
+    final matchInText = pwdTextReg.firstMatch(rawText);
+    if (matchInText != null) {
+      extractedPwd = matchInText.group(1)!;
+    }
+  }
+
+  // 6. 回填
+  _urlController.text = cleanUrl;
+  if (extractedPwd.isNotEmpty) {
+    _pwdController.text = extractedPwd;
+  }
+}
+
+  // /// 提取和清理杂文的核心方法（支持全自动提取链接与密码）
+  // void _cleanAndParseInput() {
+  //   final rawText = _urlController.text.trim();
+  //   if (rawText.isEmpty) return;
+
+  //   // 1. 从一整段中文杂文里提取出干净的 https://pan.baidu.com/s/xxx 链接
+  //   final urlRegExp = RegExp(
+  //     r'https?://(?:pan|yun)\.baidu\.com/s/[a-zA-Z0-9_-]+[^\s]*',
+  //   );
+  //   final urlMatch = urlRegExp.firstMatch(rawText);
+
+  //   if (urlMatch != null) {
+  //     String cleanUrl = urlMatch.group(0)!;
+  //     // 抹掉链接末尾可能附带的中文或英文标点
+  //     cleanUrl = cleanUrl.replaceAll(RegExp(r'[，。！？；:：,]+$'), '');
+
+  //     String extractedPwd = _pwdController.text.trim();
+
+  //     // 2. 尝试解析提取码
+  //     if (extractedPwd.isEmpty) {
+  //       // 方案 A：从 url 参数 ?pwd=xxxx 或 &pwd=xxxx 中提取
+  //       final pwdInUrlReg = RegExp(r'[?&]pwd=([a-zA-Z0-9]{4})');
+  //       final matchInUrl = pwdInUrlReg.firstMatch(cleanUrl);
+
+  //       if (matchInUrl != null) {
+  //         extractedPwd = matchInUrl.group(1)!;
+  //       } else {
+  //         // 方案 B：正则匹配“提取码: xxxx”或“密码: xxxx”
+  //         final pwdTextReg = RegExp(
+  //           r'(?:提取码|密码|pwd|码)\s*[:：]?\s*([a-zA-Z0-9]{4})',
+  //           caseSensitive: false,
+  //         );
+  //         final matchInText = pwdTextReg.firstMatch(rawText);
+  //         if (matchInText != null) {
+  //           extractedPwd = matchInText.group(1)!;
+  //         }
+  //       }
+  //     }
+
+  //     // 回填清洗后的结果
+  //     _urlController.text = cleanUrl;
+  //     if (extractedPwd.isNotEmpty) {
+  //       _pwdController.text = extractedPwd;
+  //     }
+  //   }
+  // }
 
   Future<void> _handleSubmit() async {
     if (_isSubmitting) return;
