@@ -649,42 +649,14 @@ void _cleanAndParseInput() {
     });
 
     try {
-      final checkResult = await BaiduLinkChecker.check(
-        linkInput: url,
-        pwdInput: pwd,
-      );
-
-      // 💥 关键修复点：如果链路检测失败，设置错误提示，并跳出程序（由于有 finally 保证，不会卡死状态）
-      bool isCheckPassed = false;
-      switch (checkResult) {
-        case BaiduLinkCheckResult.invalidPwd:
-          setState(
-            () => _errorMessage = pwd.isEmpty
-                ? '该链接需要提取码，请填写提取码'
-                : '提取码错误，请检查后重新输入',
-          );
-          break;
-
-        case BaiduLinkCheckResult.linkExpired:
-          setState(() => _errorMessage = '链接不存在、已失效或分享已被取消');
-          break;
-
-        case BaiduLinkCheckResult.networkError:
-          setState(() => _errorMessage = '网络连接异常，无法校验链接');
-          break;
-
-        case BaiduLinkCheckResult.valid:
-          isCheckPassed = true;
-          break;
-      }
-
+ 
       // 只有通过检测才触发后端保存操作
-      if (isCheckPassed) {
+      
         await widget.onSubmit(url, pwd);
         if (mounted) {
           Navigator.pop(context);
         }
-      }
+      
     } catch (e) {
       if (mounted) {
         setState(() {
