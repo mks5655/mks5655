@@ -58,7 +58,7 @@ jobs:
             --obfuscate `
             --split-debug-info="$env:GITHUB_WORKSPACE\vanguard_symbols"
 
-      # 将 dll/ 目录下的 DLL 复制进 Release 目录，供 ZIP 与安装包共用
+      # 将 dll/ 目录下的 DLL 复制进 Release 目录，供 ZIP、安装包与 MSIX 共用
       - name: Copy extra DLLs into Release
         shell: powershell
         run: |
@@ -77,6 +77,24 @@ jobs:
           $buildDir = "pan_client/build/windows/x64/runner/Release"
           $zipPath = "$env:GITHUB_WORKSPACE\output_windows\pan-client-windows-x64-v1.0.${{ github.run_id }}.zip"
           Compress-Archive -Path "$buildDir\*" -DestinationPath $zipPath -Force
+
+      # 生成 MSIX 安装包（--build-windows=false 避免重复编译覆盖刚复制进去的 DLL）
+      - name: Build MSIX Package
+        working-directory: pan_client
+        shell: powershell
+        run: |
+          $msixVer = "1.0.0.${{ github.run_number }}"
+          dart run msix:create --build-windows=false --msix-version $msixVer
+
+          $releaseDir = "$env:GITHUB_WORKSPACE\pan_client\build\windows\x64\runner\Release"
+          $msixFile = Get-ChildItem -Path $releaseDir -Filter "*.msix" | Select-Object -First 1
+          if (-not $msixFile) {
+            throw "未找到生成的 .msix 文件，请检查 pubspec.yaml 中的 msix_config 配置。"
+          }
+
+          $destMsix = "$env:GITHUB_WORKSPACE\output_windows\pan-client-windows-x64-v1.0.${{ github.run_id }}.msix"
+          Move-Item -Path $msixFile.FullName -Destination $destMsix -Force
+          Write-Host "MSIX saved to $destMsix"
 
       - name: Archive Debug Symbols
         shell: powershell
@@ -171,10 +189,12 @@ jobs:
           body: |
             ### pan_client Windows Release (Build ${{ github.run_number }})
             * **单文件安装包（推荐）**：`pan-client-windows-x64-v1.0.${{ github.run_id }}-setup.exe` （双击安装，自动创建快捷方式）
+            * **MSIX 安装包**：`pan-client-windows-x64-v1.0.${{ github.run_id }}.msix` （适用于微软商店提交/安装）
             * **应用压缩包**：`pan-client-windows-x64-v1.0.${{ github.run_id }}.zip` （绿化免安装版，解压后双击 `.exe` 运行）
             * **解析符号表**：`pan-client-windows-symbols-v1.0.${{ github.run_id }}.zip` （保留备用，用于还原崩溃堆栈）
           files: |
             output_windows/pan-client-windows-x64-*.zip
+            output_windows/pan-client-windows-x64-*.msix
             output_windows/pan-client-windows-x64-*-setup.exe
             output_windows/pan-client-windows-symbols-*.zip
         env:

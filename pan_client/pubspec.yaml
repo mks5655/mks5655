@@ -56,10 +56,22 @@ dependencies:
   open_filex: ^4.5.0
   permission_handler: ^11.3.0
 
+msix_config:
+  display_name: pcloud
+  publisher_display_name: PClient
+  identity_name: PClient.acloud
+  publisher: CN=6713CE40-524D-424E-A6CC-F3499C189B2D
+  msix_version: 1.0.0.0
+  logo_path: assets/icon/pcloud.png
+  architecture: x64
+  capabilities: internetClient
+  store: true
+  
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_launcher_icons: ^0.13.1 # 添加图标生成插件
+  msix: ^3.16.8 # 👈 补回 msix 依赖
 
 flutter_launcher_icons:
   android: true
