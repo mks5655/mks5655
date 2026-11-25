@@ -7,26 +7,23 @@ on:
   workflow_dispatch:
 
 permissions:
-  actions: write # 授权删除 Caches 和 Artifacts
-  contents: write # 授权写入 Release 和文件
+  actions: write
+  contents: write
 
 jobs:
   build-windows:
     runs-on: windows-latest
 
     steps:
-      # 1. 检出代码
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. 设置 Java 环境
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '17'
 
-      # 3. 设置 Flutter 环境
       - name: Set up Flutter SDK
         uses: subosito/flutter-action@v2
         with:
@@ -34,12 +31,9 @@ jobs:
           channel: 'stable'
           cache: true
 
-      # 4. 显式配置 Windows 桌面端支持
       - name: Enable Windows support
-        run: |
-          flutter config --enable-windows-desktop
+        run: flutter config --enable-windows-desktop
 
-      # 缓存管理
       - name: Cache pub dependencies
         uses: actions/cache@v4
         with:
@@ -49,15 +43,10 @@ jobs:
             pub-windows-${{ runner.os }}-${{ hashFiles('pan_client/pubspec.lock') }}
             pub-windows-${{ runner.os }}
 
-      
-      # 5. 获取 Flutter 依赖
       - name: Install dependencies
         working-directory: pan_client
         run: flutter pub get
 
-      # 💡 6. 删除了原先会强行覆盖项目的 flutter create --overwrite 命令！
-
-      # 7. 编译 Windows Release 版本 (带混淆 + 抽离符号表)
       - name: Build Windows App (Obfuscated)
         working-directory: pan_client
         shell: powershell
@@ -69,26 +58,85 @@ jobs:
             --obfuscate `
             --split-debug-info="$env:GITHUB_WORKSPACE\vanguard_symbols"
 
-      # 8. 打包为 ZIP 格式 (包含 exe、dll 以及 data 文件夹)
+      # 将 dll/ 目录下的 DLL 复制进 Release 目录，供 ZIP 与安装包共用
+      - name: Copy extra DLLs into Release
+        shell: powershell
+        run: |
+          $buildDir = "$env:GITHUB_WORKSPACE\pan_client\build\windows\x64\runner\Release"
+          $dllDir = "$env:GITHUB_WORKSPACE\dll"
+          if (Test-Path $dllDir) {
+            Copy-Item -Path "$dllDir\*.dll" -Destination $buildDir -Force
+            Write-Host "Copied DLLs from $dllDir to $buildDir"
+          } else {
+            Write-Host "No dll directory found, skipping."
+          }
+
       - name: Create ZIP archive
         shell: powershell
         run: |
           $buildDir = "pan_client/build/windows/x64/runner/Release"
           $zipPath = "$env:GITHUB_WORKSPACE\output_windows\pan-client-windows-x64-v1.0.${{ github.run_id }}.zip"
-          
-          # 打包 Release 目录下的所有运行依赖
           Compress-Archive -Path "$buildDir\*" -DestinationPath $zipPath -Force
 
-      # 9. 打包符号表 (.zip)
       - name: Archive Debug Symbols
         shell: powershell
         run: |
           $symbolsDir = "$env:GITHUB_WORKSPACE\vanguard_symbols"
           $symbolsZip = "$env:GITHUB_WORKSPACE\output_windows\pan-client-windows-symbols-v1.0.${{ github.run_id }}.zip"
-          
           Compress-Archive -Path "$symbolsDir\*" -DestinationPath $symbolsZip -Force
 
-      # 清理旧缓存
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build single-file Installer (Setup.exe)
+        shell: powershell
+        run: |
+          $buildDir = "$env:GITHUB_WORKSPACE\pan_client\build\windows\x64\runner\Release"
+          $outputDir = "$env:GITHUB_WORKSPACE\output_windows"
+          $issPath = "$env:GITHUB_WORKSPACE\installer.iss"
+
+          $issContent = @"
+          [Setup]
+          AppId={{8F3C2A1B-7D4E-4A9C-9B2F-1E5D6C7A8B90}
+          AppName=pan_client
+          AppVersion=1.0.${{ github.run_number }}
+          AppPublisher=pan_client
+          DefaultDirName={autopf}\pan_client
+          DefaultGroupName=pan_client
+          OutputDir=$outputDir
+          OutputBaseFilename=pan-client-windows-x64-v1.0.${{ github.run_id }}-setup
+          Compression=lzma2
+          SolidCompression=yes
+          WizardStyle=modern
+          ArchitecturesAllowed=x64
+          ArchitecturesInstallIn64BitMode=x64
+          UninstallDisplayIcon={app}\pan_client.exe
+          DisableProgramGroupPage=yes
+
+          [Files]
+          Source: "$buildDir\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs
+          Source: "$env:GITHUB_WORKSPACE\dll\*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+
+          [Icons]
+          Name: "{group}\pan_client"; Filename: "{app}\pan_client.exe"
+          Name: "{autodesktop}\pan_client"; Filename: "{app}\pan_client.exe"; Tasks: desktopicon
+
+          [Tasks]
+          Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务:"
+
+          [Run]
+          Filename: "{app}\pan_client.exe"; Description: "立即运行 pan_client"; Flags: nowait postinstall skipifsilent
+          "@
+
+          $issContent = $issContent -replace '(?m)^\s{10}', ''
+          Set-Content -Path $issPath -Value $issContent -Encoding UTF8
+
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (!(Test-Path $iscc)) {
+            $iscc = "C:\Program Files\Inno Setup 6\ISCC.exe"
+          }
+          & $iscc $issPath
+
       - name: Delete old Windows caches before saving new
         uses: actions/github-script@v7
         with:
@@ -115,7 +163,6 @@ jobs:
               console.log('Error deleting old Windows caches:', error.message);
             }
 
-      # 10. 发布产物到 GitHub Releases
       - name: Release Windows App & Symbols to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
@@ -123,10 +170,12 @@ jobs:
           name: "Release v1.0.${{ github.run_number }}"
           body: |
             ### pan_client Windows Release (Build ${{ github.run_number }})
-            * **应用压缩包**：`pan-client-windows-x64-v1.0.${{ github.run_id }}.zip` （Windows 64位绿化免安装版，解压后双击 `.exe` 运行）
+            * **单文件安装包（推荐）**：`pan-client-windows-x64-v1.0.${{ github.run_id }}-setup.exe` （双击安装，自动创建快捷方式）
+            * **应用压缩包**：`pan-client-windows-x64-v1.0.${{ github.run_id }}.zip` （绿化免安装版，解压后双击 `.exe` 运行）
             * **解析符号表**：`pan-client-windows-symbols-v1.0.${{ github.run_id }}.zip` （保留备用，用于还原崩溃堆栈）
           files: |
             output_windows/pan-client-windows-x64-*.zip
+            output_windows/pan-client-windows-x64-*-setup.exe
             output_windows/pan-client-windows-symbols-*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
