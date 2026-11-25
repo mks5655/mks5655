@@ -83,8 +83,7 @@ jobs:
         working-directory: pan_client
         shell: powershell
         run: |
-          $msixVer = "1.0.0.${{ github.run_number }}"
-          dart run msix:create --build-windows=false --msix-version $msixVer
+          dart run msix:create --build-windows=false
 
           $releaseDir = "$env:GITHUB_WORKSPACE\pan_client\build\windows\x64\runner\Release"
           $msixFile = Get-ChildItem -Path $releaseDir -Filter "*.msix" | Select-Object -First 1
@@ -95,7 +94,7 @@ jobs:
           $destMsix = "$env:GITHUB_WORKSPACE\output_windows\pan-client-windows-x64-v1.0.${{ github.run_id }}.msix"
           Move-Item -Path $msixFile.FullName -Destination $destMsix -Force
           Write-Host "MSIX saved to $destMsix"
-
+          
       - name: Archive Debug Symbols
         shell: powershell
         run: |
