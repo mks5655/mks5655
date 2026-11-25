@@ -89,7 +89,7 @@ jobs:
           $releaseDir = "$env:GITHUB_WORKSPACE\pan_client\build\windows\x64\runner\Release"
           $msixFile = Get-ChildItem -Path $releaseDir -Filter "*.msix" | Select-Object -First 1
           if (-not $msixFile) {
-            throw "未找到生成的 .msix 文件，请检查 pubspec.yaml 中的 msix_config 配置。"
+            throw "MSIX file not found. Check msix_config in pubspec.yaml."
           }
 
           $destMsix = "$env:GITHUB_WORKSPACE\output_windows\pan-client-windows-x64-v1.0.${{ github.run_id }}.msix"
