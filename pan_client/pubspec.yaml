@@ -57,7 +57,7 @@ dependencies:
   permission_handler: ^11.3.0
 
 msix_config:
-  display_name: pcloud
+  display_name: acloud
   publisher_display_name: PClient
   identity_name: PClient.acloud
   publisher: CN=6713CE40-524D-424E-A6CC-F3499C189B2D
