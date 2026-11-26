@@ -6,23 +6,20 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../api/user_api.dart';
 import '../download/download_manager.dart';
-import '../models/download_task.dart';
 import '../models/file_model.dart';
 import '../models/file_response.dart';
 import '../utils/download_helper.dart';
 import 'settings_page.dart';
 import '../utils/event_bus.dart';
 
-/// L1 级别：内存顶级缓存（带 cardCode 域隔离）
+/// L1 级别：内存目录缓存（按 cardCode + path 隔离）
 final Map<String, FileResponse> _globalDirCache = {};
-String? _globalLastPath;
 String? _globalLastCardCode;
 
 /// 清空本地磁盘及内存中的所有目录缓存
 Future<void> clearAllDirCache() async {
   // 1. 清空内存 L1 缓存
   _globalDirCache.clear();
-  _globalLastPath = null;
   _globalLastCardCode = null;
 
   // 2. 清空 SharedPreferences 磁盘持久化缓存
@@ -64,6 +61,9 @@ class FilePageState extends State<FilePage> with AutomaticKeepAliveClientMixin {
   bool loading = false;
   final Set<String> selectedIds = {};
 
+  /// 请求序列号，用于防止异步竞态或旧请求晚到覆盖最新状态
+  int _requestSeq = 0;
+
   // ==================== 搜索功能状态 ====================
   bool _isSearching = false;
   String _searchQuery = '';
@@ -95,23 +95,15 @@ class FilePageState extends State<FilePage> with AutomaticKeepAliveClientMixin {
 
     if (_globalLastCardCode != widget.cardCode) {
       _globalDirCache.clear();
-      _globalLastPath = null;
       _globalLastCardCode = widget.cardCode;
     }
 
     final initialKey = _getCacheKey(widget.response.path);
+    response = widget.response;
+    _globalDirCache[initialKey] = response;
+    _saveToPersistentCache(initialKey, response);
 
-    if (_globalLastPath != null &&
-        _globalDirCache.containsKey(_getCacheKey(_globalLastPath!))) {
-      response = _globalDirCache[_getCacheKey(_globalLastPath!)]!;
-    } else {
-      response = widget.response;
-      _globalDirCache[initialKey] = response;
-      _globalLastPath = response.path;
-      _saveToPersistentCache(initialKey, response);
-    }
-
-    _restoreFromPersistentCache(initialKey);
+    _restoreFromPersistentCache(initialKey, expectedPath: widget.response.path);
 
     _eventSubscription = globalEventBus.stream.listen((event) {
       if (event == 'refresh_file_list') {
@@ -142,7 +134,11 @@ class FilePageState extends State<FilePage> with AutomaticKeepAliveClientMixin {
     }
   }
 
-  Future<void> _restoreFromPersistentCache(String cacheKey) async {
+  Future<void> _restoreFromPersistentCache(
+    String cacheKey, {
+    required String expectedPath,
+  }) async {
+    final int seqAtStart = _requestSeq;
     try {
       final prefs = await SharedPreferences.getInstance();
       final jsonString = prefs.getString(cacheKey);
@@ -151,7 +147,12 @@ class FilePageState extends State<FilePage> with AutomaticKeepAliveClientMixin {
         final cachedResponse = FileResponse.fromJson(jsonMap);
 
         _globalDirCache[cacheKey] = cachedResponse;
-        if (mounted && _globalLastPath == cachedResponse.path) {
+
+        // 仅当未发生新的目录切换/加载，且当前仍停留在同一路径时才更新视图
+        if (mounted &&
+            seqAtStart == _requestSeq &&
+            !loading &&
+            response.path == expectedPath) {
           setState(() {
             response = cachedResponse;
           });
@@ -159,8 +160,10 @@ class FilePageState extends State<FilePage> with AutomaticKeepAliveClientMixin {
       }
     } catch (e) {
       debugPrint("读取本地持久化缓存失败 [$cacheKey]: $e");
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.remove(cacheKey);
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.remove(cacheKey);
+      } catch (_) {}
     }
   }
 
@@ -193,7 +196,8 @@ class FilePageState extends State<FilePage> with AutomaticKeepAliveClientMixin {
     if (response.breadcrumbs.length <= 1) return;
 
     final currentList = filteredFiles;
-    final allCurrentSelected = currentList.every((e) => selectedIds.contains(e.fsId));
+    final allCurrentSelected =
+        currentList.every((e) => selectedIds.contains(e.fsId));
 
     setState(() {
       if (allCurrentSelected) {
@@ -217,89 +221,114 @@ class FilePageState extends State<FilePage> with AutomaticKeepAliveClientMixin {
   }
 
   Future<void> openDir(FileModel file) async {
+    debugPrint(
+      "[FilePage] openDir -> name=${file.name}, isDir=${file.isDir}, path=${file.path}, currentPath=${response.path}, loading=$loading",
+    );
     if (!file.isDir) return;
     _clearSearch();
     await loadPath(file.path);
   }
 
   Future<void> loadPath(String path, {bool forceRefresh = false}) async {
-    if (loading) return;
+    if (loading) {
+      debugPrint("[FilePage] loadPath 跳过：当前正在加载，目标路径=$path");
+      return;
+    }
 
+    final int seq = ++_requestSeq;
     final cacheKey = _getCacheKey(path);
     final String rootPath = "/转存/${widget.cardCode}";
     final bool isRootDir = (path == rootPath);
 
+    debugPrint(
+      "[FilePage] loadPath开始 -> seq=$seq, path=$path, forceRefresh=$forceRefresh, isRootDir=$isRootDir",
+    );
+
     if (!forceRefresh && _globalDirCache.containsKey(cacheKey)) {
+      if (!mounted || seq != _requestSeq) return;
+      debugPrint("[FilePage] seq=$seq 命中内存缓存: $cacheKey");
       setState(() {
         response = _globalDirCache[cacheKey]!;
-        _globalLastPath = path;
         selectedIds.clear();
       });
       return;
     }
 
     if (!forceRefresh) {
-      final prefs = await SharedPreferences.getInstance();
-      final jsonString = prefs.getString(cacheKey);
-      if (jsonString != null && jsonString.isNotEmpty) {
-        try {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final jsonString = prefs.getString(cacheKey);
+        if (jsonString != null && jsonString.isNotEmpty) {
           final Map<String, dynamic> jsonMap = jsonDecode(jsonString);
           final cachedResponse = FileResponse.fromJson(jsonMap);
 
           _globalDirCache[cacheKey] = cachedResponse;
+          if (!mounted || seq != _requestSeq) return;
+
+          debugPrint("[FilePage] seq=$seq 命中磁盘缓存: $cacheKey");
           setState(() {
             response = cachedResponse;
-            _globalLastPath = path;
             selectedIds.clear();
           });
           return;
-        } catch (e) {
-          debugPrint("解析磁盘缓存出错: $e");
         }
+      } catch (e) {
+        debugPrint("[FilePage] seq=$seq 解析磁盘缓存出错: $e");
       }
     }
 
     if (forceRefresh && !isRootDir) {
       if (_globalDirCache.containsKey(cacheKey)) {
+        if (!mounted || seq != _requestSeq) return;
+        debugPrint("[FilePage] seq=$seq forceRefresh 子目录使用本地缓存: $cacheKey");
         setState(() {
           response = _globalDirCache[cacheKey]!;
-          _globalLastPath = path;
           selectedIds.clear();
         });
         if (mounted) {
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(const SnackBar(content: Text('子目录已优先使用本地缓存')));
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('子目录已优先使用本地缓存')),
+          );
         }
         return;
       }
     }
 
+    if (!mounted || seq != _requestSeq) return;
     setState(() {
       loading = true;
     });
 
     try {
       final result = await api.getFiles(widget.cardCode, path: path);
+      if (!mounted || seq != _requestSeq) {
+        debugPrint("[FilePage] seq=$seq 请求返回时已过期或页面已销毁，丢弃结果");
+        return;
+      }
+
+      debugPrint(
+        "[FilePage] seq=$seq 接口返回成功 -> path=${result.path}, filesCount=${result.files.length}, breadcrumbsCount=${result.breadcrumbs.length}",
+      );
 
       _globalDirCache[cacheKey] = result;
-      _globalLastPath = path;
       _saveToPersistentCache(cacheKey, result);
 
-      if (mounted) {
-        setState(() {
-          response = result;
-          selectedIds.clear();
-        });
-      }
-    } catch (e) {
-      if (mounted) {
+      setState(() {
+        response = result;
+        selectedIds.clear();
+      });
+    } catch (e, stack) {
+      debugPrint("[FilePage] seq=$seq 加载目录失败 [$path]: $e\n$stack");
+      if (mounted && seq == _requestSeq) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('加载目录失败: $e'), backgroundColor: Colors.red),
+          SnackBar(
+            content: Text('加载目录失败: $e'),
+            backgroundColor: Colors.red,
+          ),
         );
       }
     } finally {
-      if (mounted) {
+      if (mounted && seq == _requestSeq) {
         setState(() {
           loading = false;
         });
@@ -312,14 +341,14 @@ class FilePageState extends State<FilePage> with AutomaticKeepAliveClientMixin {
     await loadPath(response.path, forceRefresh: true);
   }
 
-  /// 递归获取指定目录下的所有文件（支持满 5 条边扫描边分批写入任务）
-  Future<List<Map<String, dynamic>>> _getAllFilesWithRelPath(
+  /// 递归获取指定目录下的所有文件（支持满 20 条边扫描边分批写入任务）
+  Future<List>> _getAllFilesWithRelPath(
     String dirPath,
     List<String> parentBreadcrumbs, {
-    List<Map<String, dynamic>>? buffer,
-    Future<void> Function(List<Map<String, dynamic>> chunk)? onChunk,
+    List>? buffer,
+    Future<void> Function(List> chunk)? onChunk,
   }) async {
-    List<Map<String, dynamic>> resultList = [];
+    List> resultList = [];
     final currentBuffer = buffer ?? [];
 
     try {
@@ -341,7 +370,7 @@ class FilePageState extends State<FilePage> with AutomaticKeepAliveClientMixin {
           if (onChunk != null) {
             currentBuffer.add(itemData);
             if (currentBuffer.length >= 20) {
-              final chunkToFlush = List<Map<String, dynamic>>.from(currentBuffer);
+              final chunkToFlush = List>.from(currentBuffer);
               currentBuffer.clear();
               await onChunk(chunkToFlush);
             }
@@ -393,10 +422,10 @@ class FilePageState extends State<FilePage> with AutomaticKeepAliveClientMixin {
 
     int totalAdded = 0;
     List<String> allSkippedFiles = [];
-    List<Map<String, dynamic>> pendingBuffer = [];
+    List> pendingBuffer = [];
 
-    // 定义分批写入的私有回调（满 5 条时自动写入并通知）
-    Future<void> flushChunk(List<Map<String, dynamic>> chunkItems) async {
+    // 定义分批写入的私有回调（满 20 条时自动写入并通知）
+    Future<void> flushChunk(List> chunkItems) async {
       if (chunkItems.isEmpty) return;
 
       final batchItems = chunkItems.map((item) {
@@ -441,14 +470,13 @@ class FilePageState extends State<FilePage> with AutomaticKeepAliveClientMixin {
           });
 
           if (pendingBuffer.length >= 20) {
-            final chunk = List<Map<String, dynamic>>.from(pendingBuffer);
+            final chunk = List>.from(pendingBuffer);
             pendingBuffer.clear();
             await flushChunk(chunk);
           }
         }
       }
 
-      // 递归扫描完成后，如仍有不足 5 条的剩余缓存，一次性写入
       if (pendingBuffer.isNotEmpty) {
         await flushChunk(pendingBuffer);
         pendingBuffer.clear();
@@ -466,7 +494,10 @@ class FilePageState extends State<FilePage> with AutomaticKeepAliveClientMixin {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('创建下载任务失败: $e'), backgroundColor: Colors.red),
+          SnackBar(
+            content: Text('创建下载任务失败: $e'),
+            backgroundColor: Colors.red,
+          ),
         );
       }
     } finally {
@@ -597,7 +628,6 @@ class FilePageState extends State<FilePage> with AutomaticKeepAliveClientMixin {
                   });
                 },
               ),
-              // 根目录下不显示全选按钮
               if (isSelecting && !isRootDir)
                 IconButton(
                   icon: Icon(
@@ -743,7 +773,7 @@ class FilePageState extends State<FilePage> with AutomaticKeepAliveClientMixin {
                             child: Material(
                               color: selected
                                   ? theme.colorScheme.primaryContainer
-                                        .withOpacity(0.4)
+                                      .withOpacity(0.4)
                                   : theme.cardColor,
                               borderRadius: BorderRadius.circular(12),
                               clipBehavior: Clip.antiAlias,
@@ -764,7 +794,6 @@ class FilePageState extends State<FilePage> with AutomaticKeepAliveClientMixin {
                                 leading: Row(
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
-                                    // 仅在非根目录下渲染勾选框
                                     if (!isRootDir) ...[
                                       Checkbox(
                                         value: selected,
@@ -814,7 +843,6 @@ class FilePageState extends State<FilePage> with AutomaticKeepAliveClientMixin {
                                   } else if (file.isDir) {
                                     openDir(file);
                                   } else {
-                                    // 根目录下点击文件弹出保护提示
                                     if (isRootDir) {
                                       ScaffoldMessenger.of(context).showSnackBar(
                                         const SnackBar(
@@ -827,17 +855,17 @@ class FilePageState extends State<FilePage> with AutomaticKeepAliveClientMixin {
                                     }
                                   }
                                 },
-                                // 根目录下禁用长按选中
                                 onLongPress: isRootDir ? null : () => toggleSelect(file),
                                 trailing: file.isDir
                                     ? IconButton(
                                         icon: const Icon(
                                           Icons.chevron_right_rounded,
                                         ),
-                                        onPressed: loading ? null : () => openDir(file),
+                                        onPressed:
+                                            loading ? null : () => openDir(file),
                                       )
                                     : (isRootDir
-                                        ? null // 根目录下文件不渲染右侧下载图标
+                                        ? null
                                         : IconButton(
                                             icon: const Icon(
                                               Icons.file_download_outlined,
