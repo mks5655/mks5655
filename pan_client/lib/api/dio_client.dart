@@ -126,7 +126,7 @@ bP6MvPJwNQzcmRk13NfIRmPVNnGuV/u3gm3c
     // =========================================================================
     apiDio = Dio(
       BaseOptions(
-        baseUrl: "https://baidu-pan.mtd.dpdns.org",
+        baseUrl: "https://bd-pan.mtd.dpdns.org",
         connectTimeout: const Duration(seconds: 15),
         receiveTimeout: const Duration(seconds: 60),
         headers: {"Accept": "application/json"},
